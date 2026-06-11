@@ -818,7 +818,26 @@ async function extractAddressesWithAI(content, filename) {
       model: 'gpt-4o',
       max_tokens: 1000,
       messages: [
-        { role: 'system', content: 'You are an address extraction specialist. Extract ALL street addresses from provided content. Return ONLY a JSON array of address strings, nothing else. Each address should be complete (street, city, state if available). Example output: ["123 Main St, Nashville, TN", "456 Oak Ave, Brentwood, TN"]. If no addresses found, return [].' },
+        { role: 'system', content: 'You are an address extraction and cleaning specialist. Extract ALL street addresses from provided content and clean them up for Google Maps.
+
+Rules:
+1. Return ONLY a JSON array of cleaned address strings, nothing else
+2. Each address must contain ONLY: house number + street name + street type + city + state
+3. Do NOT include neighborhood names, subdivision names, HOA labels, or community names
+4. Expand ALL street type abbreviations for Google Maps compatibility:
+   - Cr or Cres → Cir (Circle)
+   - Ct → Ct (Court - keep as is)
+   - Ave → Ave
+   - Ln → Ln
+   - Blvd → Blvd
+   - Dr → Dr
+   - St → St
+   - Rd → Rd
+   - Way → Way
+5. For HOA entries (e.g. "HOA Bakers Bridge Road Franklin, TN"), use just the street address without HOA label
+6. If city/state is missing from an entry, infer it from other addresses in the same file
+7. Example output: ["412 Hope Ave, Franklin, TN", "404 Beauchamp Cir, Franklin, TN", "Bakers Bridge Rd, Franklin, TN"]
+If no addresses found, return [].' },
         { role: 'user', content: `Extract all addresses from this file (${filename}):\n\n${trimmed}` }
       ]
     })
@@ -893,7 +912,11 @@ Respond ONLY with a JSON object in this exact format (no markdown, no explanatio
   ]
 }
 
-CRITICAL RULES: orderedStops must include ALL stops in optimized order (do NOT include start address). Every address must match exactly character-for-character from the original list. Minimize backtracking by grouping nearby streets and neighborhoods.`;
+CRITICAL RULES:
+- orderedStops must include ALL stops in optimized order (do NOT include start address)
+- Every address in orderedStops must match exactly character-for-character from the original list above
+- Minimize backtracking by grouping nearby streets and neighborhoods
+- Expand any abbreviations in the segments (Cr → Cir, Ct → Court) for the "from" and "to" fields only`;
 
   const resp = await fetch('/api/claude', {
     method: 'POST',
@@ -911,6 +934,49 @@ CRITICAL RULES: orderedStops must include ALL stops in optimized order (do NOT i
   const text = data.choices?.[0]?.message?.content || '';
   const clean = text.replace(/```json|```/g, '').trim();
   return JSON.parse(clean);
+}
+
+function cleanForMaps(addr) {
+  const US_STATES = 'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC';
+  const STREET_TYPES = ['Cir','Cres','Court','Ct','Ave','Avenue','Ln','Lane','Dr','Drive','Blvd','Boulevard','Pkwy','Parkway','St','Street','Rd','Road','Way','Pl','Place','Ter','Terrace','Trl','Trail'];
+  const ABBREVS = {
+    '\\bCr\\b': 'Cir', '\\bCres\\b': 'Cir',
+    '\\bAve\\.?\\b': 'Ave', '\\bBlvd\\.?\\b': 'Blvd',
+    '\\bLn\\.?\\b': 'Ln', '\\bDr\\.?\\b': 'Dr',
+    '\\bPkwy\\.?\\b': 'Pkwy', '\\bSt\\.?\\b': 'St',
+    '\\bRd\\.?\\b': 'Rd', '\\bPl\\.?\\b': 'Pl',
+    '\\bTer\\.?\\b': 'Ter', '\\bCt\\.?\\b': 'Ct'
+  };
+  const CITIES = ['Franklin','Nashville','Brentwood','Murfreesboro','Hendersonville','Gallatin','Smyrna','Spring Hill','Columbia','Clarksville','Nolensville','Thompsons Station'];
+
+  let cleaned = addr.replace(/^HOA\s+/i, '').trim();
+
+  for (const [abbr, full] of Object.entries(ABBREVS)) {
+    cleaned = cleaned.replace(new RegExp(abbr, 'gi'), full);
+  }
+
+  for (const city of CITIES) {
+    const re = new RegExp('(\\S)\\s+(' + city + '\\s*,)', 'i');
+    if (re.test(cleaned)) {
+      cleaned = cleaned.replace(re, '$1, $2');
+      break;
+    }
+  }
+
+  const stateMatch = cleaned.match(new RegExp('(.+?)\\s*,\\s*(' + US_STATES + ')\\s*(\\d{5})?$', 'i'));
+  if (stateMatch) {
+    const beforeState = stateMatch[1].trim();
+    const state = stateMatch[2].toUpperCase();
+    const zip = stateMatch[3] || '';
+    const parts = beforeState.split(',').map(p => p.trim());
+    if (parts.length >= 2) {
+      const street = parts[0];
+      const city = parts[parts.length - 1];
+      cleaned = street + ', ' + city + ', ' + state + (zip ? ' ' + zip : '');
+    }
+  }
+
+  return cleaned;
 }
 
 function displayResults(result, start) {
@@ -971,7 +1037,7 @@ function displayResults(result, start) {
     timeline.appendChild(stop);
   });
 
-  const mapsQuery = [start, ...stops].map(a => encodeURIComponent(a)).join('/');
+  const mapsQuery = [start, ...stops].map(a => encodeURIComponent(cleanForMaps(a))).join('/');
   document.getElementById('mapsLink').href = `https://www.google.com/maps/dir/${mapsQuery}`;
 
   document.getElementById('aiNote').textContent = '💡 ' + (result.routingNotes || 'Route optimized using nearest-neighbor heuristic with geographic clustering.');
