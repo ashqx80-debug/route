@@ -6,6 +6,7 @@
 <title>Route Optimizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -793,13 +794,14 @@ async function extractXlsx(file) {
     reader.onload = e => {
       try {
         const data = new Uint8Array(e.target.result);
-        let str = '';
-        for (let i = 0; i < Math.min(data.length, 50000); i++) {
-          const c = data[i];
-          if (c >= 32 && c < 127) str += String.fromCharCode(c);
-          else if (c === 10 || c === 13 || c === 9) str += ' ';
-        }
-        resolve(str);
+        const workbook = XLSX.read(data, { type: 'array' });
+        let allText = '';
+        workbook.SheetNames.forEach(sheetName => {
+          const sheet = workbook.Sheets[sheetName];
+          const csv = XLSX.utils.sheet_to_csv(sheet);
+          allText += csv + '\n';
+        });
+        resolve(allText);
       } catch (err) { reject(err); }
     };
     reader.onerror = () => reject(new Error('File read error'));
@@ -873,7 +875,7 @@ async function optimizeRoute() {
 }
 
 async function callRouteOptimizerAI(start, stops) {
-  const prompt = `You are a logistics routing AI. Given a starting address and a list of delivery/visit stops, determine the most efficient route using nearest-neighbor heuristic with 2-opt improvements to minimize total travel distance.
+  const prompt = `You are a professional route optimization AI with expert knowledge of US roads and neighborhoods. Reorder delivery stops to minimize total driving distance, avoiding backtracking. Group stops on the same street or neighborhood together. Use real geographic knowledge of the area.
 
 Starting address: ${start}
 Stops to visit:
@@ -891,7 +893,7 @@ Respond ONLY with a JSON object in this exact format (no markdown, no explanatio
   ]
 }
 
-The orderedStops should be the stops in the optimal visit order (do NOT include the starting address in orderedStops). Use geographic reasoning to cluster nearby stops and minimize backtracking. All addresses in orderedStops must exactly match one of the original stops provided.`;
+CRITICAL RULES: orderedStops must include ALL stops in optimized order (do NOT include start address). Every address must match exactly character-for-character from the original list. Minimize backtracking by grouping nearby streets and neighborhoods.`;
 
   const resp = await fetch('/api/claude', {
     method: 'POST',
